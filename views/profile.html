@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Profile</title>
+        <link rel="stylesheet" href="/static/style.css" />
+    </head>
+    <body class="bg-black text-base text-gray-200 py-12 max-w-lg w-full mx-auto">
+    <h2>{{.Name}}</h2>
+    <h2>{{.Email}}</h2>
+    <a href="/logout">
+        <button class="px-3 py-2 mt-5 rounded-xl bg-red-600">
+            Logout
+        </button>
+    </a>
+</body>
+</html>
