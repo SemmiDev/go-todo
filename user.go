@@ -29,6 +29,14 @@ var (
 	ErrorUserExists = fmt.Errorf("user already exists")
 )
 
+type UserStore interface {
+	Get(id string) (User, error)
+	GetByEmail(email string) (User, error)
+	Insert(user User) error
+	Exists(id string) bool
+	Update(user User) error
+}
+
 func (s *UserMapStore) Get(id string) (User, error) {
 	user, ok := s.users[id]
 	if !ok {

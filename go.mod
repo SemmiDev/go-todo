@@ -1,4 +1,4 @@
-module github.com/semmidev/auth-service
+module github.com/semmidev/go-todo
 
 go 1.20
 

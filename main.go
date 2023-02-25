@@ -2,33 +2,36 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
+	"path"
 	"text/template"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/semmidev/auth-service/token"
+	"github.com/semmidev/go-todo/auth"
+	"github.com/semmidev/go-todo/token"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
-var googleOauthConfig *oauth2.Config
+//go:embed views/*
+var Resources embed.FS
 
-func init() {
-	googleOauthConfig = &oauth2.Config{
-		RedirectURL:  "http://localhost:8080/auth/google/callback",
-		ClientID:     "26803728727-4mecc7j32s5kg21gj4n5n7t2pnorkkkh.apps.googleusercontent.com",
-		ClientSecret: "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",
-		Scopes: []string{
-			"https://www.googleapis.com/auth/userinfo.email",
-			"https://www.googleapis.com/auth/userinfo.profile",
-		},
-		Endpoint: google.Endpoint,
-	}
+//go:embed public
+var StaticFiles embed.FS
+
+func fsHandler() http.Handler {
+    sub, err := fs.Sub(StaticFiles, "public")
+    if err != nil {
+        panic(err)
+    }
+
+    return http.FileServer(http.FS(sub))
 }
 
 func main() {
@@ -47,59 +50,104 @@ func main() {
 		log.Fatalf("failed to create token maker: %v", err)
 	}
 
-	fs := http.FileServer(http.Dir("./static"))
-	r.Handle("/static/*", http.StripPrefix("/static/", fs))
+	r.Get("/public/*", http.StripPrefix("/public", fsHandler()).ServeHTTP)
 
 	handlers := &handlers{
 		userStore: NewUserMapStore(),
 		tokenMaker: token,
+		embed: Resources,
 	}
 
-	r.Handle("/", http.HandlerFunc(handlers.HomePage))
-	r.With(AuthMiddleware(token)).Handle("/profile", http.HandlerFunc(handlers.ProfilePage))
+	r.With(auth.MustLoginMiddleware(token)).Handle("/", http.HandlerFunc(handlers.handleHomePage))
 
-	r.Get("/logout", handlers.handleLogout)
+	r.Get("/login", handlers.handleLoginPage)
 	r.Get("/auth/login", handlers.handleGoogleLogin)
 	r.Get("/auth/google/callback", handlers.handleGoogleCallback)
+	r.Get("/logout", handlers.handleLogout)
+
+	r.With(auth.MustLoginMiddleware(token)).Handle("/profile", http.HandlerFunc(handlers.handleProfilePage))
+	r.Get("/login", handlers.handleLoginPage)
 
 	fmt.Println("Server started at http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
 
 type handlers struct {
-	userStore *UserMapStore
+	userStore  UserStore
 	tokenMaker token.Maker
+	embed      embed.FS
 }
 
-func (h *handlers) HomePage(w http.ResponseWriter, r *http.Request) {
-	tmpl := template.Must(template.ParseFiles("views/index.html"))
-	tmpl.Execute(w, nil)
+func (h *handlers) handleHomePage(w http.ResponseWriter, r *http.Request) {
+	homePage := path.Join("views","index.html")
+	tmpl := template.Must(template.ParseFS(h.embed, homePage))
+	err := tmpl.Execute(w, nil)
+	if err != nil {
+		err := newErrorPage("Internal server error", http.StatusInternalServerError)
+		h.handleErrorPage(w, r, err)
+		return
+	}
 }
 
-func (h *handlers) ProfilePage(w http.ResponseWriter, r *http.Request) {
-	payload := r.Context().Value(authorizationPayloadKey).(*token.Payload)
-	user, _ := h.userStore.GetByEmail(payload.Email)
+func (h *handlers) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	// if user has already logged in, redirect to home page
+	cookie, err := r.Cookie("access_token")
+	if err == nil {
+		accessToken := cookie.Value
+		_, err := h.tokenMaker.VerifyToken(accessToken)
+		if err == nil {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+	}
 
-	tmpl := template.Must(template.ParseFiles("views/profile.html"))
-	tmpl.Execute(w, user)
+	loginPage := path.Join("views","login.html")
+	tmpl := template.Must(template.ParseFS(h.embed, loginPage))
+	err = tmpl.Execute(w, nil)
+	if err != nil {
+		err := newErrorPage("Internal server error", http.StatusInternalServerError)
+		h.handleErrorPage(w, r, err)
+		return
+	}
+}
+
+func (h *handlers) handleProfilePage(w http.ResponseWriter, r *http.Request) {
+	payload := r.Context().Value(auth.AuthorizationPayloadKey).(*token.Payload)
+	user, err := h.userStore.GetByEmail(payload.Email)
+	if err != nil {
+		err := newErrorPage("User not found", http.StatusNotFound)
+		h.handleErrorPage(w, r, err)
+		return
+	}
+
+	profilePage := path.Join("views","profile.html")
+	tmpl := template.Must(template.ParseFS(h.embed, profilePage))
+	err = tmpl.Execute(w, user)
+	if err != nil {
+		err := newErrorPage("Internal server error", http.StatusInternalServerError)
+		h.handleErrorPage(w, r, err)
+		return
+	}
 }
 
 func (h *handlers) handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
-	url := googleOauthConfig.AuthCodeURL("state", oauth2.AccessTypeOffline)
+	url := auth.GoogleOauthConfig.AuthCodeURL("state", oauth2.AccessTypeOffline)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
 func (h *handlers) handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
-	token, err := googleOauthConfig.Exchange(context.Background(), code)
+	token, err := auth.GoogleOauthConfig.Exchange(context.Background(), code)
 	if err != nil {
-		http.Error(w, "Error exchanging code for token", http.StatusBadRequest)
+		err := newErrorPage("Error exchanging code for token", http.StatusBadRequest)
+		h.handleErrorPage(w, r, err)
 		return
 	}
 
 	resp, err := http.Get("https://www.googleapis.com/oauth2/v2/userinfo?access_token=" + token.AccessToken)
 	if err != nil {
-		http.Error(w, "Error getting user info", http.StatusBadRequest)
+		err := newErrorPage("Error getting user info", http.StatusBadRequest)
+		h.handleErrorPage(w, r, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -107,7 +155,8 @@ func (h *handlers) handleGoogleCallback(w http.ResponseWriter, r *http.Request) 
 	var userInfo map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&userInfo)
 	if err != nil {
-		http.Error(w, "Error decoding user info", http.StatusBadRequest)
+		err := newErrorPage("Error decoding user info", http.StatusBadRequest)
+		h.handleErrorPage(w, r, err)
 		return
 	}
 
@@ -125,16 +174,18 @@ func (h *handlers) handleGoogleCallback(w http.ResponseWriter, r *http.Request) 
 	err = h.userStore.Insert(userInfoStruct)
 	if err != nil {
 		if err != ErrorUserExists {
-			log.Printf("failed to insert user: %v", err)
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+			err := newErrorPage("Internal server error", http.StatusInternalServerError)
+			h.handleErrorPage(w, r, err)
+			return
 		}
 	}
 
 	duration := time.Hour * 24 * 30
 	pasetoToken, _, err := h.tokenMaker.CreateToken(userInfoStruct.Email, duration)
 	if err != nil {
-		log.Printf("failed to create token: %v", err)
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+		err := newErrorPage("Internal server error", http.StatusInternalServerError)
+		h.handleErrorPage(w, r, err)
+		return
 	}
 
 	cookie := http.Cookie{
@@ -143,8 +194,9 @@ func (h *handlers) handleGoogleCallback(w http.ResponseWriter, r *http.Request) 
 		Value:   pasetoToken,
 		Expires: time.Now().Add(duration),
 	}
+
 	http.SetCookie(w, &cookie)
-	http.Redirect(w, r, "/profile", http.StatusTemporaryRedirect)
+	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 }
 
 func (h *handlers) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -155,5 +207,22 @@ func (h *handlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Expires: time.Now().Add(-time.Hour),
 	}
 	http.SetCookie(w, &cookie)
-	http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+	http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
+}
+
+func (h *handlers) handleErrorPage(w http.ResponseWriter, r *http.Request, data any) {
+	errorPage := path.Join("views","error.html")
+	tmpl := template.Must(template.ParseFS(h.embed, errorPage))
+	err := tmpl.Execute(w, data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func newErrorPage(message string, code int) map[string]any {
+	return map[string]any{
+		"Message": message,
+		"Code": code,
+	}
 }
