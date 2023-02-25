@@ -6,12 +6,72 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Home</title>
         <link rel="stylesheet" href="public/style.css" />
+        <script
+            src="https://code.jquery.com/jquery-3.6.3.slim.min.js"
+            integrity="sha256-ZwqZIVdD3iXNyGHbSYdsmWP//UBokj2FHAxKuSBKDSo="
+            crossorigin="anonymous"
+        ></script>
     </head>
     <body
         class="bg-black py-12 text-base text-gray-200 max-w-lg w-full mx-auto"
     >
-        <h1>welcome back</h1>
-
-        <button></button>
+        <div class="flex gap-x-2 items-center">
+            <input
+                type="text"
+                placeholder="search Todos"
+                id="search-todo-input"
+            />
+        </div>
+        <div>
+            <ul class="todo-list"></ul>
+        </div>
     </body>
+
+    <script>
+        const searchInput = document.getElementById('search-todo-input');
+
+        // Fungsi debounce untuk membatasi jumlah request
+        function debounce(func, delay) {
+            let debounceTimer;
+            return function () {
+                const context = this;
+                const args = arguments;
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(
+                    () => func.apply(context, args),
+                    delay
+                );
+            };
+        }
+
+        function renderResults(results) {
+            const searchResults = document.querySelector('.todo-list');
+            searchResults.innerHTML = '';
+            results.forEach((result) => {
+                const li = document.createElement('li');
+                li.innerHTML = `
+                    <a href="">
+                        <h3>${result.task}</h3>
+                    </a>
+                `;
+                searchResults.appendChild(li);
+            });
+        }
+
+        function getQueryResults(query) {
+            fetch(`/todos/search?q=${query}`)
+                .then((response) => response.json())
+                .then((data) => renderResults(data));
+        }
+
+        searchInput.addEventListener(
+            'input',
+            debounce(() => {
+                const query = searchInput.value.trim();
+                if (query !== '') {
+                    getQueryResults(query);
+                }
+            }, 300)
+        );
+    </script>
 </html>

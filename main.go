@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/mail"
 	"path"
+	"strings"
 	"text/template"
 	"time"
 
@@ -54,6 +56,7 @@ func main() {
 
 	handlers := &handlers{
 		userStore: NewUserMapStore(),
+		todoStore: NewTodoMapStore(),
 		tokenMaker: token,
 		embed: Resources,
 	}
@@ -65,6 +68,7 @@ func main() {
 	r.Get("/auth/google/callback", handlers.handleGoogleCallback)
 	r.Get("/logout", handlers.handleLogout)
 
+	r.With(auth.MustLoginMiddleware(token)).Handle("/todos/search", http.HandlerFunc(handlers.handleSearchTodos))
 	r.With(auth.MustLoginMiddleware(token)).Handle("/profile", http.HandlerFunc(handlers.handleProfilePage))
 	r.Get("/login", handlers.handleLoginPage)
 
@@ -74,6 +78,7 @@ func main() {
 
 type handlers struct {
 	userStore  UserStore
+	todoStore  TodoStore
 	tokenMaker token.Maker
 	embed      embed.FS
 }
@@ -82,6 +87,27 @@ func (h *handlers) handleHomePage(w http.ResponseWriter, r *http.Request) {
 	homePage := path.Join("views","index.html")
 	tmpl := template.Must(template.ParseFS(h.embed, homePage))
 	err := tmpl.Execute(w, nil)
+	if err != nil {
+		err := newErrorPage("Internal server error", http.StatusInternalServerError)
+		h.handleErrorPage(w, r, err)
+		return
+	}
+}
+
+func (h *handlers) handleSearchTodos(w http.ResponseWriter, r *http.Request) {
+	payload := r.Context().Value(auth.AuthorizationPayloadKey).(*token.Payload)
+	user, err := h.userStore.GetByEmail(payload.Email)
+	if err != nil {
+		err := newErrorPage("User not found", http.StatusNotFound)
+		h.handleErrorPage(w, r, err)
+		return
+	}
+
+	q := r.URL.Query().Get("q")
+
+	todos := h.todoStore.Search(user.ID, q)
+	w.Header().Set("Content-Type", "application/json")
+	err = json.NewEncoder(w).Encode(todos)
 	if err != nil {
 		err := newErrorPage("Internal server error", http.StatusInternalServerError)
 		h.handleErrorPage(w, r, err)
@@ -171,6 +197,13 @@ func (h *handlers) handleGoogleCallback(w http.ResponseWriter, r *http.Request) 
 		VerifiedEmail: userInfo["verified_email"].(bool),
 	}
 
+	acceptedEmail := validateEmail(userInfoStruct.Email)
+	if !acceptedEmail {
+		err := newErrorPage("Please use university email", http.StatusBadRequest)
+		h.handleErrorPage(w, r, err)
+		return
+	}
+
 	err = h.userStore.Insert(userInfoStruct)
 	if err != nil {
 		if err != ErrorUserExists {
@@ -179,6 +212,8 @@ func (h *handlers) handleGoogleCallback(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+
+	h.todoStore.Seed(userInfoStruct.ID)
 
 	duration := time.Hour * 24 * 30
 	pasetoToken, _, err := h.tokenMaker.CreateToken(userInfoStruct.Email, duration)
@@ -225,4 +260,19 @@ func newErrorPage(message string, code int) map[string]any {
 		"Message": message,
 		"Code": code,
 	}
+}
+
+func validateEmail(email string) bool {
+    _, err := mail.ParseAddress(email)
+    if err != nil {
+        return false
+    }
+
+    parts := strings.Split(email, "@")
+    if len(parts) != 2 {
+        return false
+    }
+    domain := parts[1]
+
+	return domain == "student.unri.ac.id" || domain == "lecturer.unri.ac.id"
 }
